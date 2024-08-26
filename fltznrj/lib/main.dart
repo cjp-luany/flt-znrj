@@ -6,7 +6,8 @@ import 'dart:ui';
 import 'dart:io';
 import 'package:flutter_sound/flutter_sound.dart' as flutter_sound;
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
+import 'package:image_picker/image_picker.dart';
+// import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_sound_platform_interface/flutter_sound_recorder_platform_interface.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -67,8 +68,8 @@ class MyCustomScrollBehavior extends MaterialScrollBehavior {
 class ChatController extends ChangeNotifier {
   List<Message> messages = [];
 
-  void addMessage(String text, bool isUser) {
-    messages.add(Message(isUser: isUser, text: text));
+  void addMessage(String text, bool isUser, {bool isImage = false}) {
+    messages.add(Message(isUser: isUser, text: text, isImage: isImage));
     if (isUser) {
       // 简单的AI助手回应
       Future.delayed(const Duration(seconds: 1), () {
@@ -196,13 +197,37 @@ class MyHomePage extends StatelessWidget {
 }
 
 // 聊天界面
-class ChatContainer extends StatelessWidget {
+class ChatContainer extends StatefulWidget {
   const ChatContainer({super.key});
+
+  @override
+  _ChatContainerState createState() => _ChatContainerState();
+}
+
+class _ChatContainerState extends State<ChatContainer> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final chatController = Provider.of<ChatController>(context);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+
     return ListView.builder(
+      controller: _scrollController,
       itemCount: chatController.messages.length,
       itemBuilder: (context, index) {
         final message = chatController.messages[index];
@@ -219,12 +244,19 @@ class ChatContainer extends StatelessWidget {
                   : const Color(0xFFE5E5EA),
               borderRadius: BorderRadius.circular(18),
             ),
-            child: Text(
-              message.text,
-              style: TextStyle(
-                color: message.isUser ? Colors.white : Colors.black,
-              ),
-            ),
+            child: message.isImage
+                ? Image.memory(
+                    base64Decode(message.text),
+                    fit: BoxFit.cover,
+                    height: 200,
+                    width: 200,
+                  )
+                : SelectableText(
+                    message.text,
+                    style: TextStyle(
+                      color: message.isUser ? Colors.white : Colors.black,
+                    ),
+                  ),
           ),
         );
       },
@@ -236,8 +268,9 @@ class ChatContainer extends StatelessWidget {
 class Message {
   final bool isUser;
   final String text;
+  final bool isImage; // 追加一个字段以标识该消息是否为图片
 
-  Message({required this.isUser, required this.text});
+  Message({required this.isUser, required this.text, this.isImage = false});
 }
 
 // 输入区域
@@ -259,7 +292,9 @@ class _InputAreaState extends State<InputArea> {
   String _recordedFilePath = '';
   String _responseMessage = '';
   String _responseMessage2 = '';
-  late Position? _currentPosition;
+  // late Position? _currentPosition;
+
+  String? base64Image;
 
   @override
   void initState() {
@@ -268,6 +303,7 @@ class _InputAreaState extends State<InputArea> {
     _player = flutter_sound.FlutterSoundPlayer();
     _checkPermissions();
     _initialize();
+    scheduleFetch();
 
     // 启动定时器
     // _startTimer();
@@ -300,6 +336,136 @@ class _InputAreaState extends State<InputArea> {
         // 提示用户位置获取失败
       }
     });
+  }
+
+  Future<void> _getImage() async {
+    // 权限被授予，选择图片
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+    // final pickedFile =
+    //     await MultiImagePicker.pickImages(maxImages: 1, enableCamera: true, materialOptions: const MaterialOptions(
+    //       actionBarColor: "#FF0000",
+    //       actionBarTitle: "选择图片",
+    //       allViewTitle: "所有图片",
+    //       useDetailsView: true,
+    //       selectCircleStrokeColor: "#000000",
+    //       lightStatusBar: false,
+    //       statusBarColor: '#FF0000',
+    //       startInAllView: true,
+    //       selectionLimitReachedText: "你已经选择了最大数量的图片",
+    //     ))
+
+    // 读取文件并编码为Base64
+    File imageFile = File(pickedFile!.path);
+    List<int> imageBytes = await imageFile.readAsBytes();
+    String base64Img = base64Encode(imageBytes);
+    setState(() {
+      base64Image = base64Img;
+    });
+
+    // http://47.115.151.97:8000/api/generate
+
+    // 创建JSON对象
+    final Map<String, dynamic> jsonMap = {
+      "img_base64": base64Img,
+    };
+    // final Map<String, dynamic> jsonMap = {
+    //   "model": "string",
+    //   "messages": [
+    //     {
+    //       "role": "user",
+    //       "content": [
+    //         {"type": "text", "text": "用中文回答问题，保持回复不超过20字，图片中有什么？"},
+    //         {
+    //           "type": "image_url",
+    //           "image_url": {"url": "data:image,$base64Img"}
+    //         }
+    //       ]
+    //     }
+    //   ],
+    //   "stream": false
+    // };
+
+    final String jsonString = jsonEncode(jsonMap);
+
+    Provider.of<ChatController>(context, listen: false)
+        .addMessage("图片已发送", true);
+
+    // 添加图片消息
+    Provider.of<ChatController>(context, listen: false)
+        .addMessage(base64Img, true, isImage: true); // 这里传递了isImage为true
+
+    fetchAddNowAt();
+
+    // 发送请求
+    try {
+      final response = await http.post(
+        Uri.parse(
+            'http://47.115.151.97:6201/uploadOneImage/'), // 使用localhost时，请确保在实际设备上正确配置
+        headers: {'Content-Type': 'application/json; charset=utf-8'},
+        body: jsonString,
+      );
+      // final response = await http.post(
+      //   Uri.parse(
+      //       'http://ipv6.marko1616.com:8000/v1/chat/completions'), // 使用localhost时，请确保在实际设备上正确配置
+      //   headers: {'Content-Type': 'application/json'},
+      //   body: jsonString,
+      // );
+
+      if (response.statusCode == 200) {
+        Provider.of<ChatController>(context, listen: false)
+            .addMessage("有返回结果", true);
+
+        // 提取并更新显示的结果
+        String body = utf8.decode(response.bodyBytes); // 强制 UTF-8 解码
+        var jsonData = jsonDecode(body); // 解析 JSON
+
+        setState(() {
+          // _responseMessage = jsonData['choices'][0]['message']['content'] ??
+          //     '没有返回结果'; // 获取返回的结果
+          _responseMessage =
+              "${"【图片ID】" + jsonData['data']['image_id']};【图片描述】" +
+                      jsonData['data']['image_descrpt'] ??
+                  '没有返回结果'; // 获取返回的结果
+        });
+
+        Provider.of<ChatController>(context, listen: false)
+            .addMessage(_responseMessage, true);
+
+        fetchCleanNowAt();
+
+        if (_responseMessage != '没有返回结果') {
+          // 这里二次请求
+          await _getLocationAndUploadRecording(false, _responseMessage);
+        }
+      } else {
+        Provider.of<ChatController>(context, listen: false)
+            .addMessage("请求失败", true);
+        fetchCleanNowAt();
+      }
+    } catch (e) {
+      Provider.of<ChatController>(context, listen: false)
+          .addMessage("请求失败e:$e", true);
+      fetchCleanNowAt();
+    }
+
+    // 将Base64编码复制到剪贴板
+    // Clipboard.setData(ClipboardData(text: base64Img));
+
+    // 显示Toast提示
+    // Fluttertoast.showToast(
+    //   msg: "图片已复制到剪贴板",
+    //   toastLength: Toast.LENGTH_SHORT,
+    //   gravity: ToastGravity.BOTTOM,
+    // );
+
+    // 请求相册权限
+    var status = await Permission.photos.request();
+    if (status.isGranted) {
+    } else {
+      // 权限被拒绝
+      print('相册权限被拒绝');
+    }
   }
 
   Future<void> _checkPermissions() async {
@@ -349,6 +515,18 @@ class _InputAreaState extends State<InputArea> {
 
     // 获取地理坐标
     await _getLocationAndUploadRecording(true, '');
+  }
+
+  String? _extractUUID(String response) {
+    RegExp regex = RegExp(r'<img>(.*?)</img>');
+    Match? match = regex.firstMatch(response);
+    return match?.group(1); // 返回UUID，或返回null
+  }
+
+  String? _extractUUID2(String response) {
+    RegExp regex = RegExp(r'\(([^)]+)\)');
+    Match? match = regex.firstMatch(response);
+    return match?.group(1); // 返回UUID，或返回null
   }
 
   Future<void> _getLocationAndUploadRecording(bool isWav, String text) async {
@@ -404,23 +582,123 @@ class _InputAreaState extends State<InputArea> {
 
         Provider.of<ChatController>(context, listen: false)
             .addMessage(_responseMessage2, false);
+
+        // TODO:
+        fetchCleanNowAt();
+
+        // 从响应中提取 UUID
+        String? uuid = _extractUUID(_responseMessage2);
+        if (uuid != null) {
+          String imgBase64 = await _fetchImageBase64(uuid); // 向服务器请求图片
+
+          if (imgBase64 != '') {
+            Provider.of<ChatController>(context, listen: false)
+                .addMessage(imgBase64, false, isImage: true);
+          }
+        }
       }
     }
     // 上传录音并传递位置
   }
 
-  Future<void> _getCurrentLocation() async {
-    Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.best,
-            forceAndroidLocationManager: true)
-        .then((Position position) {
-      setState(() {
-        _currentPosition = position;
-      });
-    }).catchError((e) {
-      print(e);
+  Future<String> fetchFromServer() async {
+    final response =
+        await http.get(Uri.parse('http://47.115.151.97:6202/now_at'));
+    if (response.statusCode == 200) {
+      // 使用 UTF-8 解码响应的字节
+      var decodedResponse = utf8.decode(response.bodyBytes);
+
+      // 如果服务器返回 200 OK 响应，那么解析 JSON 数据
+      List<String> list = List<String>.from(json.decode(decodedResponse));
+
+      if (list.isNotEmpty) {
+        // 如果不为空，返回最后一个元素
+        // return list.last;
+        return '小ai思考中...';
+      } else {
+        // 如果为空，返回空字符串
+        return '';
+      }
+    } else {
+      // 如果服务器没有返回 200 OK 响应，则抛出异常
+      throw Exception('Failed to load data from server');
+    }
+  }
+
+  Future fetchCleanNowAt() async {
+    final response =
+        await http.get(Uri.parse('http://47.115.151.97:6202/clean_now_at'));
+    if (response.statusCode == 200) {
+      // 使用 UTF-8 解码响应的字节
+      var decodedResponse = utf8.decode(response.bodyBytes);
+
+      return;
+    } else {
+      // 如果服务器没有返回 200 OK 响应，则抛出异常
+      throw Exception('Failed to load data from server');
+    }
+  }
+
+  Future fetchAddNowAt() async {
+    final response =
+        await http.get(Uri.parse('http://47.115.151.97:6202/add_image_proc'));
+    if (response.statusCode == 200) {
+      // 使用 UTF-8 解码响应的字节
+      var decodedResponse = utf8.decode(response.bodyBytes);
+
+      return;
+    } else {
+      // 如果服务器没有返回 200 OK 响应，则抛出异常
+      throw Exception('Failed to load data from server');
+    }
+  }
+
+  void scheduleFetch() {
+    Timer.periodic(const Duration(seconds: 8), (Timer t) async {
+      String valueFromServer = await fetchFromServer();
+
+      if (valueFromServer == '') {
+        return;
+      } else {
+        Provider.of<ChatController>(context, listen: false)
+            .addMessage(valueFromServer, false);
+      }
+
+      // print(valueFromServer);
     });
   }
+
+  Future<String> _fetchImageBase64(String imageId) async {
+    if (imageId == '') return '';
+    final response = await http
+        .get(Uri.parse('http://47.115.151.97:6201/api/image/get/$imageId'));
+
+    if (response.statusCode == 200) {
+      // 使用 UTF-8 解码响应的字节
+      var decodedResponse = utf8.decode(response.bodyBytes);
+
+      // 然后将解码后的字符串解析为 JSON
+      Map<String, dynamic> jsonResponse = json.decode(decodedResponse);
+      // List<dynamic> data = jsonResponse['image_code'];
+      // print(data);'data:image,' +
+
+      return jsonResponse['image_code'] ?? '';
+    } else {
+      return '';
+    }
+  }
+  // Future<void> _getCurrentLocation() async {
+  //   Geolocator.getCurrentPosition(
+  //           desiredAccuracy: LocationAccuracy.best,
+  //           forceAndroidLocationManager: true)
+  //       .then((Position position) {
+  //     setState(() {
+  //       _currentPosition = position;
+  //     });
+  //   }).catchError((e) {
+  //     print(e);
+  //   });
+  // }
 
   Future<void> _uploadRecording(double latitude, double longitude) async {
     final File audioFile = File(_recordedFilePath);
@@ -591,6 +869,7 @@ class _InputAreaState extends State<InputArea> {
             icon: const Icon(Icons.camera_alt, color: Color(0xFF007AFF)),
             onPressed: () {
               // 执行相机功能
+              _getImage();
             },
           ),
         ],
@@ -936,6 +1215,8 @@ class _NotePageState extends State<NotePage> {
             'wake_location_name': item['wake_location_name'],
             'record_location': item['record_location'],
             'record_location_name': item['record_location_name'],
+            'image_id': item['image_id'] ?? '',
+            'image_descrpt': item['image_descrpt'] ?? '',
           };
         }).toList();
 
@@ -1044,6 +1325,27 @@ class _NotePageState extends State<NotePage> {
     }
   }
 
+  // Fetch 图片 Base64
+  Future<String> _fetchImageBase64(String imageId) async {
+    if (imageId == '') return '';
+    final response = await http
+        .get(Uri.parse('http://47.115.151.97:6201/api/image/get/$imageId'));
+
+    if (response.statusCode == 200) {
+      // 使用 UTF-8 解码响应的字节
+      var decodedResponse = utf8.decode(response.bodyBytes);
+
+      // 然后将解码后的字符串解析为 JSON
+      Map<String, dynamic> jsonResponse = json.decode(decodedResponse);
+      // List<dynamic> data = jsonResponse['image_code'];
+      // print(data);'data:image,' +
+
+      return jsonResponse['image_code'] ?? '';
+    } else {
+      return '';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1111,6 +1413,52 @@ class _NotePageState extends State<NotePage> {
                             Text(
                               "记录时间: ${record['record_time']} 坐标：${record['record_location'] ?? '无'}",
                               style: const TextStyle(color: Colors.white70),
+                            ),
+                            const SizedBox(height: 10),
+                            // 图片和标注部分
+                            // 使用 FutureBuilder 来处理图片
+                            FutureBuilder<String>(
+                              future: _fetchImageBase64(
+                                  record['image_id']), // 这里使用图片ID
+                              builder: (context, snapshot) {
+                                if (snapshot.connectionState ==
+                                    ConnectionState.waiting) {
+                                  return const CircularProgressIndicator(); // 显示加载指示器
+                                } else if (snapshot.hasError) {
+                                  return const Text("加载图片失败",
+                                      style: TextStyle(color: Colors.red));
+                                } else if (snapshot.hasData &&
+                                    snapshot.data!.isNotEmpty) {
+                                  try {
+                                    final imageBytes =
+                                        base64Decode(snapshot.data!);
+                                    String desc =
+                                        record['image_descrpt'] ?? ''; // 获取图片描述
+                                    return Column(
+                                      children: [
+                                        Image.memory(
+                                            imageBytes), // 显示 Base64 图片
+                                        const SizedBox(height: 5),
+                                        Text(
+                                          desc.isNotEmpty
+                                              ? desc
+                                              : "这是记录的图片", // 显示描述或默认文本
+                                          style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 12),
+                                        ),
+                                      ],
+                                    );
+                                  } catch (e) {
+                                    // 捕获解码错误
+                                    return const Text("图片格式错误",
+                                        style: TextStyle(color: Colors.red));
+                                  }
+                                } else {
+                                  return const Text("没有图片",
+                                      style: TextStyle(color: Colors.white70));
+                                }
+                              },
                             ),
                           ],
                         ),
